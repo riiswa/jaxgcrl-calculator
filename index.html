@@ -1,0 +1,508 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>JaxGCRL Configuration Calculator</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Add some extra config for Tailwind -->
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    colors: {
+                        github: {
+                            'bg': '#0d1117',
+                            'card': '#161b22',
+                            'border': '#30363d',
+                            'primary': '#58a6ff',
+                            'secondary': '#8b949e',
+                            'accent': '#238636',
+                            'danger': '#f85149',
+                            'warning': '#d29922'
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Helvetica', 'Arial', 'sans-serif', 'Apple Color Emoji', 'Segoe UI Emoji']
+                    }
+                }
+            }
+        }
+    </script>
+    <!-- React & ReactDOM -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <!-- Babel for JSX -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        /* Custom scrollbar styles */
+        ::-webkit-scrollbar {
+            width: 10px;
+            height: 10px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #161b22;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #30363d;
+            border-radius: 5px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #3f444e;
+        }
+        /* For Firefox */
+        html {
+            scrollbar-color: #30363d #161b22;
+            scrollbar-width: thin;
+        }
+        body {
+            overflow-x: hidden;
+        }
+    </style>
+</head>
+<body class="bg-github-bg text-gray-200 min-h-screen font-sans">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+
+        const JaxGCRLCalculator = () => {
+            const [config, setConfig] = useState({
+                totalEnvSteps: 50_000_000,
+                episodeLength: 1001,
+                numEnvs: 256,
+                actionRepeat: 1,
+                numEvals: 200,
+                unrollLength: 1,
+                batchSize: 256,
+                trainStepMultiplier: 1,
+                maxDevicesPerHost: 1
+            });
+
+            const [results, setResults] = useState({
+                envStepsPerActorStep: 0,
+                prefillEnvSteps: 0,
+                numEvalsAfterInit: 0,
+                trainingStepsPerEpoch: 0,
+                totalSteps: 0,
+                utdRatio: 0,
+                fullTrajectoriesTotal: 0,
+                fullTrajectoriesPerEnv: 0,
+                errors: [],
+                warnings: []
+            });
+
+            // Calculate the results whenever the configuration changes
+            useEffect(() => {
+                calculateResults();
+            }, [config]);
+
+            const handleChange = (e) => {
+                const { name, value } = e.target;
+                setConfig({
+                    ...config,
+                    [name]: parseInt(value) || 0
+                });
+            };
+
+            const calculateResults = () => {
+                const errors = [];
+                const warnings = [];
+                
+                // Calculate key values
+                const envStepsPerActorStep = config.actionRepeat * config.numEnvs * config.unrollLength;
+                const minReplaySize = 0; // Assuming default value
+                const numPrefillActorSteps = Math.floor(minReplaySize / config.unrollLength) + 1;
+                const prefillEnvSteps = numPrefillActorSteps * envStepsPerActorStep;
+                const numEvalsAfterInit = Math.max(config.numEvals - 1, 1);
+                
+                // Ceiling division for training steps per epoch
+                const trainingStepsPerEpochRaw = (config.totalEnvSteps - prefillEnvSteps) / (numEvalsAfterInit * envStepsPerActorStep);
+                const trainingStepsPerEpoch = Math.ceil(trainingStepsPerEpochRaw);
+                
+                // Calculate total steps
+                const totalSteps = prefillEnvSteps + (numEvalsAfterInit * trainingStepsPerEpoch * envStepsPerActorStep);
+                
+                // Calculate UTD (Update-To-Data) ratio
+                const utdRatio = config.trainStepMultiplier / (config.numEnvs * config.unrollLength);
+                
+                // Calculate number of full trajectories (episodes)
+                // Total completed across all environments
+                const fullTrajectoriesTotal = Math.floor(totalSteps / config.episodeLength);
+                
+                // Per environment (on average)
+                const fullTrajectoriesPerEnv = Math.floor(totalSteps / config.episodeLength / config.numEnvs);
+
+                // Check for errors and warnings
+                
+                // Error 1: Check if num_envs * episode_length is divisible by batch_size
+                if ((config.numEnvs * config.episodeLength) % config.batchSize !== 0) {
+                    errors.push(`num_envs(${config.numEnvs}) * episode_length(${config.episodeLength}) = ${config.numEnvs * config.episodeLength} is not divisible by batch_size(${config.batchSize})`);
+                }
+                
+                // Error 2: Check if num_envs is divisible by total number of chips
+                if (config.numEnvs % config.maxDevicesPerHost !== 0) {
+                    errors.push(`num_envs(${config.numEnvs}) is not divisible by max_devices_per_host(${config.maxDevicesPerHost})`);
+                }
+                
+                // Warning: Check if total steps significantly exceeds target steps
+                if (totalSteps > config.totalEnvSteps * 1.5) {
+                    warnings.push(`Total steps (${totalSteps.toLocaleString()}) significantly exceeds target steps (${config.totalEnvSteps.toLocaleString()})`);
+                }
+                
+                // Warning: Check if episode length is too short
+                if (config.episodeLength < 100) {
+                    warnings.push(`Episode length (${config.episodeLength}) is unusually short, which may prevent the agent from learning effectively`);
+                }
+                
+                // UTD ratio warning removed
+
+                // Update results
+                setResults({
+                    envStepsPerActorStep,
+                    prefillEnvSteps,
+                    numEvalsAfterInit,
+                    trainingStepsPerEpoch,
+                    totalSteps,
+                    utdRatio,
+                    fullTrajectoriesTotal,
+                    fullTrajectoriesPerEnv,
+                    errors,
+                    warnings
+                });
+            };
+
+            // Calculate the deviation percentage from target steps
+            const getDeviationPercent = () => {
+                const deviation = ((results.totalSteps - config.totalEnvSteps) / config.totalEnvSteps * 100).toFixed(1);
+                return deviation > 0 ? `+${deviation}%` : `${deviation}%`;
+            };
+
+            // Get appropriate color for the deviation
+            const getDeviationColor = () => {
+                const deviation = (results.totalSteps - config.totalEnvSteps) / config.totalEnvSteps * 100;
+                if (Math.abs(deviation) < 5) return 'text-github-accent';
+                if (deviation > 0) return 'text-github-warning';
+                return 'text-github-primary';
+            };
+            
+            // Get appropriate color for the UTD ratio
+            const getUTDRatioColor = () => {
+                if (results.utdRatio >= 1) return 'text-github-accent';
+                if (results.utdRatio >= 0.25) return 'text-github-primary';
+                if (results.utdRatio >= 0.1) return 'text-github-warning';
+                return 'text-github-danger';
+            };
+            
+            // Get UTD ratio description
+            const getUTDRatioDescription = () => {
+                if (results.utdRatio >= 1) return 'Optimal';
+                if (results.utdRatio >= 0.25) return 'Good';
+                if (results.utdRatio >= 0.1) return 'Low';
+                return 'Very Low';
+            };
+
+            return (
+                <div className="min-h-screen bg-github-bg text-gray-200 p-4 sm:p-6">
+                    <div className="max-w-4xl mx-auto">
+                        {/* Header */}
+                        <div className="mb-8 text-center">
+                            <h1 className="text-3xl font-bold text-white">
+                                JaxGCRL Configuration Calculator
+                            </h1>
+                            <p className="text-github-secondary mt-2">Optimize your reinforcement learning configuration</p>
+                        </div>
+                        
+                        {/* Main content area */}
+                        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                            {/* Left panel - Configuration inputs */}
+                            <div className="lg:col-span-2 space-y-6">
+                                {/* Primary settings card */}
+                                <div className="bg-github-card rounded-md overflow-hidden shadow-md border border-github-border">
+                                    <div className="border-b border-github-border px-4 py-3">
+                                        <h2 className="text-lg font-medium text-white flex items-center">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-github-secondary" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fillRule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clipRule="evenodd" />
+                                            </svg>
+                                            Primary Configuration
+                                        </h2>
+                                    </div>
+                                    <div className="p-5">
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Target Environment Steps</label>
+                                                <div className="relative">
+                                                    <input
+                                                        type="number"
+                                                        name="totalEnvSteps"
+                                                        value={config.totalEnvSteps}
+                                                        onChange={handleChange}
+                                                        className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                    />
+                                                </div>
+                                            </div>
+                                            
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Episode Length</label>
+                                                <div className="relative">
+                                                    <input
+                                                        type="number"
+                                                        name="episodeLength"
+                                                        value={config.episodeLength}
+                                                        onChange={handleChange}
+                                                        className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                    />
+                                                </div>
+                                            </div>
+                                            
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Number of Environments</label>
+                                                <div className="relative">
+                                                    <input
+                                                        type="number"
+                                                        name="numEnvs"
+                                                        value={config.numEnvs}
+                                                        onChange={handleChange}
+                                                        className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                    />
+                                                </div>
+                                            </div>
+                                            
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Batch Size</label>
+                                                <div className="relative">
+                                                    <input
+                                                        type="number"
+                                                        name="batchSize"
+                                                        value={config.batchSize}
+                                                        onChange={handleChange}
+                                                        className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                    />
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {/* Advanced settings card */}
+                                <div className="bg-github-card rounded-md overflow-hidden shadow-md border border-github-border">
+                                    <div className="border-b border-github-border px-4 py-3">
+                                        <h2 className="text-lg font-medium text-white flex items-center">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-github-secondary" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fillRule="evenodd" d="M3 5a2 2 0 012-2h10a2 2 0 012 2v8a2 2 0 01-2 2h-2.22l.123.489.804.804A1 1 0 0113 18H7a1 1 0 01-.707-1.707l.804-.804L7.22 15H5a2 2 0 01-2-2V5zm5.771 7H5V5h10v7H8.771z" clipRule="evenodd" />
+                                            </svg>
+                                            Advanced Settings
+                                        </h2>
+                                    </div>
+                                    <div className="p-5">
+                                        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Action Repeat</label>
+                                                <input
+                                                    type="number"
+                                                    name="actionRepeat"
+                                                    value={config.actionRepeat}
+                                                    onChange={handleChange}
+                                                    className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                />
+                                            </div>
+                                            
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Number of Evaluations</label>
+                                                <input
+                                                    type="number"
+                                                    name="numEvals"
+                                                    value={config.numEvals}
+                                                    onChange={handleChange}
+                                                    className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                />
+                                            </div>
+                                            
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Unroll Length</label>
+                                                <input
+                                                    type="number"
+                                                    name="unrollLength"
+                                                    value={config.unrollLength}
+                                                    onChange={handleChange}
+                                                    className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                />
+                                            </div>
+                                            
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Train Step Multiplier</label>
+                                                <input
+                                                    type="number"
+                                                    name="trainStepMultiplier"
+                                                    value={config.trainStepMultiplier}
+                                                    onChange={handleChange}
+                                                    className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                />
+                                            </div>
+                                            
+                                            <div>
+                                                <label className="block text-github-secondary text-sm font-medium mb-2">Max Devices Per Host</label>
+                                                <input
+                                                    type="number"
+                                                    name="maxDevicesPerHost"
+                                                    value={config.maxDevicesPerHost}
+                                                    onChange={handleChange}
+                                                    className="bg-github-bg border border-github-border rounded-md py-2 px-3 block w-full focus:ring-1 focus:ring-github-primary focus:border-github-primary text-gray-200"
+                                                />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            {/* Right panel - Results and status */}
+                            <div className="space-y-6">
+                                {/* Total steps card */}
+                                <div className="bg-github-card rounded-md overflow-hidden shadow-md border border-github-border">
+                                    <div className="border-b border-github-border px-4 py-3">
+                                        <h2 className="text-lg font-medium text-white flex items-center">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-github-secondary" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fillRule="evenodd" d="M10 2a1 1 0 011 1v1.323l3.954 1.582 1.599-.8a1 1 0 01.894 1.79l-1.233.616 1.738 5.42a1 1 0 01-.285 1.05A3.989 3.989 0 0115 15a3.989 3.989 0 01-2.667-1.019 1 1 0 01-.285-1.05l1.715-5.349L11 6.477V16h2a1 1 0 110 2H7a1 1 0 110-2h2V6.477L6.237 7.582l1.715 5.349a1 1 0 01-.285 1.05A3.989 3.989 0 015 15a3.989 3.989 0 01-2.667-1.019 1 1 0 01-.285-1.05l1.738-5.42-1.233-.617a1 1 0 01.894-1.788l1.599.799L9 4.323V3a1 1 0 011-1z" clipRule="evenodd" />
+                                            </svg>
+                                            Total Steps
+                                        </h2>
+                                    </div>
+                                    <div className="p-5">
+                                        <div className="text-center py-3">
+                                            <div className="text-3xl font-bold text-white">{results.totalSteps.toLocaleString()}</div>
+                                            {results.totalSteps !== config.totalEnvSteps && (
+                                                <div className={`mt-1 ${getDeviationColor()}`}>
+                                                    {getDeviationPercent()} from target
+                                                </div>
+                                            )}
+                                        </div>
+                                        <div className="mt-4 grid grid-cols-1 gap-4">
+                                            <div className="bg-github-bg rounded-md p-3 border border-github-border">
+                                                <div className="flex justify-between items-center">
+                                                    <div>
+                                                        <div className="text-github-secondary text-xs uppercase tracking-wide">UTD Ratio</div>
+                                                        <div className="font-semibold mt-1">{results.utdRatio.toFixed(6)}</div>
+                                                    </div>
+                                                    <div className={`px-3 py-1 rounded-full text-xs font-medium ${getUTDRatioColor()} bg-opacity-20 bg-github-bg border border-opacity-50 ${getUTDRatioColor().replace('text', 'border')}`}>
+                                                        {getUTDRatioDescription()}
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        
+                                            <div className="grid grid-cols-2 gap-4">
+                                                <div className="bg-github-bg rounded-md p-3 border border-github-border">
+                                                    <div className="text-github-secondary text-xs uppercase tracking-wide">Environment Updates</div>
+                                                    <div className="font-semibold mt-1">{Math.ceil(results.totalSteps / (config.numEnvs * config.unrollLength)).toLocaleString()}</div>
+                                                </div>
+                                                <div className="bg-github-bg rounded-md p-3 border border-github-border">
+                                                    <div className="text-github-secondary text-xs uppercase tracking-wide">Gradient Updates</div>
+                                                    <div className="font-semibold mt-1">{(results.trainingStepsPerEpoch * results.numEvalsAfterInit * config.trainStepMultiplier).toLocaleString()}</div>
+                                                </div>
+                                            </div>
+                                            
+                                            <div className="bg-github-bg rounded-md p-3 border border-github-border">
+                                                <div className="text-github-secondary text-xs uppercase tracking-wide">Complete Episodes</div>
+                                                <div className="grid grid-cols-2 gap-2 mt-1">
+                                                    <div>
+                                                        <span className="text-xs text-github-secondary">Total:</span>
+                                                        <div className="font-semibold">{results.fullTrajectoriesTotal.toLocaleString()}</div>
+                                                    </div>
+                                                    <div>
+                                                        <span className="text-xs text-github-secondary">Per Environment:</span>
+                                                        <div className="font-semibold">{results.fullTrajectoriesPerEnv.toLocaleString()}</div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                
+                                {/* Status card */}
+                                <div className="bg-github-card rounded-md overflow-hidden shadow-md border border-github-border">
+                                    <div className="border-b border-github-border px-4 py-3">
+                                        <h2 className="text-lg font-medium text-white flex items-center">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-2 text-github-secondary" viewBox="0 0 20 20" fill="currentColor">
+                                                <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clipRule="evenodd" />
+                                            </svg>
+                                            Status
+                                        </h2>
+                                    </div>
+                                    <div className="p-5">
+                                        {results.errors.length > 0 ? (
+                                            <div className="bg-opacity-10 bg-github-danger border border-github-danger rounded-md p-3 mb-3">
+                                                <div className="font-medium text-github-danger mb-1 flex items-center">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                                                        <path fillRule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7 4a1 1 0 11-2 0 1 1 0 012 0zm-1-9a1 1 0 00-1 1v4a1 1 0 102 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                                                    </svg>
+                                                    Errors Found
+                                                </div>
+                                                <ul className="text-sm text-github-danger space-y-1">
+                                                    {results.errors.map((error, index) => (
+                                                        <li key={index} className="flex">
+                                                            <span className="mr-2">•</span>
+                                                            <span>{error}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ) : (
+                                            <div className="bg-opacity-10 bg-github-accent border border-github-accent rounded-md p-3 mb-3">
+                                                <div className="font-medium text-github-accent flex items-center">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                                                        <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                                                    </svg>
+                                                    Configuration Valid
+                                                </div>
+                                            </div>
+                                        )}
+                                        
+                                        {results.warnings.length > 0 && (
+                                            <div className="bg-opacity-10 bg-github-warning border border-github-warning rounded-md p-3 mb-3">
+                                                <div className="font-medium text-github-warning mb-1 flex items-center">
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" viewBox="0 0 20 20" fill="currentColor">
+                                                        <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                                                    </svg>
+                                                    Warnings
+                                                </div>
+                                                <ul className="text-sm text-github-warning space-y-1">
+                                                    {results.warnings.map((warning, index) => (
+                                                        <li key={index} className="flex">
+                                                            <span className="mr-2">•</span>
+                                                            <span>{warning}</span>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        )}
+                                        
+                                        <div className="bg-opacity-10 bg-github-primary border border-github-primary rounded-md p-3">
+                                            <div className="font-medium text-github-primary mb-1">Configuration Check</div>
+                                            <div className="text-xs text-gray-300">
+                                                <div className="flex items-start">
+                                                    <span className="mr-2 text-github-primary">•</span>
+                                                    <span>Ensure that num_envs * episode_length is divisible by batch_size to prevent reshape errors.</span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        {/* Footer */}
+                        <div className="mt-8 text-center text-github-secondary text-sm border-t border-github-border pt-4">
+                            <p>JaxGCRL Configuration Calculator - This is a tool for the <a href="https://github.com/MichalBortkiewicz/JaxGCRL" target="_blank" rel="noopener noreferrer" className="text-github-primary hover:underline">JaxGCRL GitHub Repository</a></p>
+                            <p className="mt-1 text-xs">This is not the official calculator of the authors</p>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // Render the app
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<JaxGCRLCalculator />);
+    </script>
+</body>
+</html>
